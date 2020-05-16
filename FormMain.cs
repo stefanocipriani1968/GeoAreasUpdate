@@ -8,6 +8,10 @@ using System.Windows.Forms;
 using System.Xml.Linq;
 using Npgsql;
 using System.Configuration;
+using Npgsql.TypeHandlers.DateTimeHandlers;
+using System.Text.RegularExpressions;
+using System.Text;
+using System.Globalization;
 
 namespace GeoAreasUpdate
 {
@@ -25,8 +29,11 @@ namespace GeoAreasUpdate
 
         private String filePath = string.Empty;
 
-        public StreamWriter log;
-        //public int progressivo = 200000;
+        public TimeSpan time;
+        public DateTime start;
+
+
+        //public StreamWriter log;
 
         public FormMain()
         {
@@ -68,22 +75,17 @@ namespace GeoAreasUpdate
 
         }
 
-        //public void WorkThreadFunction()
-        //{
-        //    try
-        //    {
-        //        ZipFile.ExtractToDirectory(filePath, AppContext.BaseDirectory + "Tempfile");
-
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        // log errors
-        //    }
-        //}
-
         private void btnElabora_Click(object sender, EventArgs e)
         {
-            // scompatto il file zip
+
+            if (txtFileZip.Text == "")
+            {
+                return;
+            }
+
+            
+            start = DateTime.Now; 
+            timer1.Enabled = true;
 
             try
             {
@@ -94,53 +96,127 @@ namespace GeoAreasUpdate
 
             }
 
-            //Thread thread = new Thread(new ThreadStart(WorkThreadFunction));
-            //thread.Start();
-
             Cursor = Cursors.WaitCursor;
 
-            ZipFile.ExtractToDirectory(filePath, AppContext.BaseDirectory + "Tempfile");
-
-            
-
-            //return; 
-
-            if (deletetype() )
+            txtLog.Text += "0. Scompattamento file zip in directory temporanea;"+ Environment.NewLine;
+            try
             {
-               
-                string path = AppContext.BaseDirectory + "\\logFile.txt";
+                Directory.CreateDirectory(AppContext.BaseDirectory + "Tempfile");
+            }
+            catch(Exception ex)
+            {
+
+            }
+            
+            progressBar1.Minimum = 0;
+            progressBar1.Value = 0;
+
+            ZipArchive zip = ZipFile.OpenRead(filePath);
+            progressBar1.Maximum = zip.Entries.Count;
+
+            foreach (ZipArchiveEntry entry in zip.Entries)
+            {
+                entry.ExtractToFile(AppContext.BaseDirectory + "Tempfile" + "\\" + entry.Name,true);
+                progressBar1.Value++;
+                Application.DoEvents();
+            }
+
+            //ZipFile.ExtractToDirectory(filePath, AppContext.BaseDirectory + "Tempfile");
+           
+            //progressBar1.Value++;
+            //Application.DoEvents();
+
+            // svuoto la tabella import_Zone e importo file csv in import_Zone
+
+            string[] fileEntriesCsv = Directory.GetFiles(AppContext.BaseDirectory + "Tempfile", "*ZONE*.csv");
+
+            if (adjust_import_zone(fileEntriesCsv[0]))
+            {
+                String timestamp = DateTime.Now.ToString("yyyyMMddhhmmss");
+                // faccio una copia di sicurezza della tabella geo_areas
+                // in una table di appoggio geo_areas_import_YYYMMDDHHIISS
+
+                Boolean saveTable = SalvaGeoAreas(timestamp);
+
+                if (saveTable)
+                {
+                    // aggiorno la tabella geo_areas con il nuovi file kml
+                    if (deletetype())
+                    {
+
+                        string path = AppContext.BaseDirectory + "\\logFile.txt";
+                        try
+                        {
+                            File.Delete(AppContext.BaseDirectory + "\\logFile.txt");
+                        }
+                        catch (Exception ex)
+                        {
+
+                        }
+                        //log = File.CreateText(path);
+                        //log.WriteLine("");
+                        //log.WriteLine("Lista File kml non caricati");
+                        //log.WriteLine("");
+                        string[] fileEntries = Directory.GetFiles(AppContext.BaseDirectory + "Tempfile", "*.kml");
+
+                        // ciclo su tutti i file
+                        txtLog.Text += "5. Inserimento kml in  tabella Geo_Areas;" + Environment.NewLine;
+
+                        progressBar1.Minimum = 0;
+                        progressBar1.Value = 0;
+                        progressBar1.Maximum = fileEntries.Count();
+                        foreach (string fileName in fileEntries)
+                        {
+                            progressBar1.Value += 1;
+                            ProcessFileKml(fileName);
+                            Application.DoEvents();
+                        }
+
+                        //log.Close();
+                    }
+                    else
+                    {
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+
+                    // Eseguo la query di update fra geo areas e import_table
+                    if (!Update_GeoAreas_Zone())
+                    {
+                        txtLog.Text += "X. Aggiornamento tabella Geo_Areas non RIUSCITO;"  + Environment.NewLine;
+                        MessageBox.Show("Processo Abortito", "Aggiornamento non eseguito", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        Cursor = Cursors.Default;
+                        return;
+
+                    }
+
+                }
+
+                // Elimino la tabella di appoggio geo_areas_import_YYYMMDDHHIISS
                 try
                 {
-                    File.Delete(AppContext.BaseDirectory + "\\logFile.txt");
+                    DropTableSave(timestamp);
                 }
                 catch (Exception ex)
                 {
+                    txtLog.Text += "X. Eliminazione tabella temporanea: " + timestamp +" non riuscita;" + Environment.NewLine;
 
                 }
-                log = File.CreateText(path);
-                log.WriteLine("");
-                log.WriteLine("Lista File kml non caricati");
-                log.WriteLine("");
-                string[] fileEntries = Directory.GetFiles(AppContext.BaseDirectory + "Tempfile", "*.kml");
 
-                // ciclo su tutti i file
-                progressBar1.Minimum = 0;
-                progressBar1.Value = 0;
-                progressBar1.Maximum = fileEntries.Count();
-                foreach (string fileName in fileEntries)
-                {
-                    progressBar1.Value += 1;
-                    ProcessFileKml(fileName);
-                }
+                timer1.Enabled = false;
+                Cursor = Cursors.Default;
+                MessageBox.Show("Processo Terminato", "Information", MessageBoxButtons.OK);
 
-                log.Close();
+            }
+            else
+            {
+                timer1.Enabled = false;
+                Cursor = Cursors.Default;
+                MessageBox.Show("Processo Abortito", "Error", MessageBoxButtons.OK,MessageBoxIcon.Error);
+                return;
             }
 
-            Cursor = Cursors.Default;
 
-            txtLog.Text = File.ReadAllText(AppContext.BaseDirectory + "\\logFile.txt");
-
-            MessageBox.Show("Processo Terminato", "Information", MessageBoxButtons.OK);
 
         }
 
@@ -155,11 +231,20 @@ namespace GeoAreasUpdate
 
             try
             {
-                doc = XDocument.Load(path);
+                //XDocument xmlDoc = null;
+
+                using (StreamReader oReader = new StreamReader(path, Encoding.GetEncoding("ISO-8859-1")))
+                {
+                    doc = XDocument.Load(oReader);
+                }
+                
+                
+                
+                ///////doc = XDocument.Load(path);
             }
             catch (Exception ex)
             {
-                log.WriteLine(path + "File corrotto");
+                //log.WriteLine(path + "File corrotto");
                 return;
             }
             XElement root = doc.Root;
@@ -183,7 +268,7 @@ namespace GeoAreasUpdate
                    ExtendedData = x.Element(ns + "ExtendedData").Elements(ns + "Data"),
                    Polygon = x.Descendants(ns + "Polygon"),
                    Style = x.Element(ns + "styleUrl")
-                   // etc
+                  
                });
 
             foreach (Placemark place in query)
@@ -260,40 +345,16 @@ namespace GeoAreasUpdate
 
                 if (!Inserttype(newElementGeo))
                 {
-                    log.WriteLine(path + "Nessun Inserimento per code :" + newElementGeo.Code);
+                    txtLog.Text += "     Inserimento placemark per code:" + newElementGeo.Code + " fallito;\n";
+                    Application.DoEvents();
+
+                    //log.WriteLine(path + "Nessun Inserimento per code :" + newElementGeo.Code);
                 }
                
             }
 
         }
 
-        private void button1_Click(object sender, EventArgs e)
-        {
-            using (var conn = new NpgsqlConnection(connString))
-
-            {
-                conn.Open();
-
-                NpgsqlCommand cmd = new NpgsqlCommand();
-                cmd.Connection = conn;
-                if (Schema =="")
-                {
-                    cmd.CommandText = "Select * from " + Table + " limit 100";
-                }
-                else
-                {
-                    cmd.CommandText = "Select * from " + "\"" + Schema + "\"." + Table + " limit 100";
-                }
-                cmd.CommandType = CommandType.Text;
-                NpgsqlDataAdapter da = new NpgsqlDataAdapter(cmd);
-                DataTable dt = new DataTable();
-                da.Fill(dt);
-                cmd.Dispose();
-                conn.Close();
-                bindingSource1.DataSource = dt;
-                dataGridView1.DataSource = bindingSource1;
-            }
-        }
         private bool deletetype()
         {
             using (var conn = new NpgsqlConnection(connString))
@@ -311,9 +372,18 @@ namespace GeoAreasUpdate
                     cmd.CommandText = "delete  from " + "\"" + Schema + "\"." + Table + " Where type_id=1";
                 }
                 cmd.CommandType = CommandType.Text;
+                txtLog.Text += "4. Eliminazione righe  tabella Geo_Areas con type_id=1;" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = 1;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+
                 try
                 {
                     cmd.ExecuteNonQuery();
+                    progressBar1.Value++;
+                    Application.DoEvents();
+
                 }
                 catch (Exception ex)
                 {
@@ -340,7 +410,7 @@ namespace GeoAreasUpdate
                 NpgsqlCommand cmd = new NpgsqlCommand();
                 cmd.Connection = conn;
 
-                // nota che @id andrà tolto perche sarà AUTOINCREMENT
+               
                 if (Schema == "")
                 {
                     cmd.CommandText = "Insert Into " + Table + "(record_creation_time,record_update_time,code,description,type_id,latitude_min,longitude_min,latitude_max,longitude_max,point_number,polygon,last_update_time,external_code,color) Values(@record_creation_time,@record_update_time,@code,@description,@type_id,@latitude_min,@longitude_min,@latitude_max,@longitude_max,@point_number,@polygon,@last_update_time,@external_code,@color)";
@@ -350,7 +420,6 @@ namespace GeoAreasUpdate
                     cmd.CommandText = "Insert Into " + "\"" + Schema + "\"." + Table + "(record_creation_time,record_update_time,code,description,type_id,latitude_min,longitude_min,latitude_max,longitude_max,point_number,polygon,last_update_time,external_code,color) Values(@record_creation_time,@record_update_time,@code,@description,@type_id,@latitude_min,@longitude_min,@latitude_max,@longitude_max,@point_number,@polygon,@last_update_time,@external_code,@color)";
                 }
                 cmd.CommandType = CommandType.Text;
-                //cmd.Parameters.Add(new NpgsqlParameter("@id", progressivo++));
                 cmd.Parameters.Add(new NpgsqlParameter("@record_creation_time", list.Record_creation_time));
                 cmd.Parameters.Add(new NpgsqlParameter("@record_update_time", list.Record_update_time));
                 cmd.Parameters.Add(new NpgsqlParameter("@code", list.Code));
@@ -382,6 +451,287 @@ namespace GeoAreasUpdate
                 conn.Close();
                 return true;
             }
+        }
+        private bool adjust_import_zone(string csvfile)
+        {
+            //Cursor = Cursors.WaitCursor;
+            using (var conn = new NpgsqlConnection(connString))
+            {
+                conn.Open();
+                NpgsqlCommand cmd = new NpgsqlCommand();
+                cmd.Connection = conn;
+                if (Schema == "")
+                {
+                    cmd.CommandText = "delete  from import_zone ";
+                }
+                else
+                {
+                    cmd.CommandText = "delete  from " + "\"" + Schema + "\".import_zone";
+                }
+                cmd.CommandType = CommandType.Text;
+
+                txtLog.Text += "1. Svuotamento tabella Import_Zone;" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = 1;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+                try
+                {
+                    cmd.ExecuteNonQuery();
+                    progressBar1.Value++;
+                    Application.DoEvents();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Attenzione Query eliminazione table import_zone non riuscita ", "Delete not Complited", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    cmd.Dispose();
+                    conn.Close();
+                    return false;
+                }
+                
+                //importo nuovo file csv in import_Zone
+
+                cmd = new NpgsqlCommand();
+                cmd.Connection = conn;
+
+                Int32 numRighe = (Int32)File.ReadAllLines(csvfile).LongLength;
+                txtLog.Text += "2. Import file csv in tabella Import_Zone;" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = numRighe;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+
+                using (var reader = new StreamReader(csvfile))
+                {
+                   
+                    int countline = 0;
+                    while (!reader.EndOfStream)
+                    {
+                      
+                        var line = reader.ReadLine();
+                        countline++;
+ 
+                        progressBar1.Value++;
+                        Application.DoEvents();
+
+
+                        if (countline > 2)
+                        {
+                            var data = line.Split(';');
+                            // data[0] data[1]
+
+                            if (Schema == "")
+                            {
+                                cmd.CommandText = "Insert into import_zone " + " values ('" + toClean(data[0]) + "','" + toClean(data[1]) + "','" + toClean(data[2]) + "','" + toClean(data[3]) + "','" + toClean(data[4]) + "','" + toClean(data[5]) + "','" + toClean(data[6]) + "','" + toClean(data[7]) + "','" + toClean(data[8]) + "','" + toClean(data[9]) + "','" + toClean(data[10]) + "','" + toClean(data[11]) + "','" + toClean(data[12]) + "','" + toClean(data[13]) + "','" + toClean(data[14]) + "','" + toClean(data[15]) + "')";
+                            }
+                            else
+                            {
+                                cmd.CommandText = "Insert into " + "\"" + Schema + "\".import_zone" + " values ('" + toClean(data[0]) + "','" + toClean(data[1]) + "','" + toClean(data[2]) + "','" + toClean(data[3]) + "','" + toClean(data[4]) + "','" + toClean(data[5]) + "','" + toClean(data[6]) + "','" + toClean(data[7]) + "','" + toClean(data[8]) + "','" + toClean(data[9]) + "','" + toClean(data[10]) + "','" + toClean(data[11]) + "','" + toClean(data[12]) + "','" + toClean(data[13]) + "','" + toClean(data[14]) + "','" + toClean(data[15]) + "')";
+                            }
+                            cmd.CommandType = CommandType.Text;
+                            try
+                            {
+                                cmd.ExecuteNonQuery();
+                            }
+                            catch (Exception ex)
+                            {
+                                MessageBox.Show("Attenzione insert csv non riuscito ", "inserimento iesima riga csv", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                cmd.Dispose();
+                                conn.Close();
+                                return false;
+                            }
+                        }
+
+                    }
+                }
+                cmd.Dispose();
+                conn.Close();
+              
+            }
+            //Cursor = Cursors.Default;
+            return true;
+        }
+
+        private Boolean SalvaGeoAreas(String extention)
+        {
+            using (var conn = new NpgsqlConnection(connString))
+
+            {
+                conn.Open();
+                NpgsqlCommand cmd = new NpgsqlCommand();
+                cmd.Connection = conn;
+                if (Schema == "")
+                {
+                    cmd.CommandText = "create table "+ Table + "_import_" + extention + " as select * from " + Table;
+                }
+                else
+                {
+                    cmd.CommandText = "create table " + Table + "_import_" + extention + " as select * from " + "\"" + Schema + "\"." + Table;
+                }
+                cmd.CommandType = CommandType.Text;
+                txtLog.Text += "3. Creazione copia tabella Geo_Areas;" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = 1;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+
+                try
+                {
+                    cmd.ExecuteNonQuery();
+                    progressBar1.Value++;
+                    Application.DoEvents();
+
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Attenzione Copia di sicurezza tabella geo_areas non riuscita", "Save not Complited", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    cmd.Dispose();
+                    conn.Close();
+                    return false;
+                }
+
+                cmd.Dispose();
+                conn.Close();
+
+
+                return true;
+            }
+        }
+
+
+        private Boolean Update_GeoAreas_Zone()
+        {
+            using (var conn = new NpgsqlConnection(connString))
+
+            {
+                conn.Open();
+                NpgsqlCommand cmd = new NpgsqlCommand();
+                cmd.Connection = conn;
+
+                txtLog.Text += "6. Aggiornamento tabella Geo_Areas con tabella Import_Zona;" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = 1;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+
+
+                if (Schema == "")
+                {
+                    cmd.CommandText = "update " + Table;
+                    cmd.CommandText += " set external_code = import_zone.linkzona,description = LEFT(CONCAT(" + Table + ".description, ' Descrizione:', import_zone.zona_descr), 200)";
+                    cmd.CommandText += " from import_zone ";
+                    cmd.CommandText += " where " + Table + ".code = concat(import_zone.comune_amm, import_zone.zona) and " + Table + ".type_id = 1";
+
+
+                }
+                else
+                {
+                    cmd.CommandText = "update " + "\"" + Schema + "\"." + Table;
+                    cmd.CommandText += " set external_code = " + "\"" + Schema + "\"." + "import_zone.linkzona,description = LEFT(CONCAT(" + "\"" + Schema + "\"." + Table + ".description, ' Descrizione:'," + "\"" + Schema + "\"." + "import_zone.zona_descr), 200)";
+                    cmd.CommandText += " from " + "\"" + Schema + "\"." + "import_zone ";
+                    cmd.CommandText += " where " + "\"" + Schema + "\"." + Table + ".code = concat(" + "\"" + Schema + "\"." + "import_zone.comune_amm," + "\"" + Schema + "\"." + "import_zone.zona) and " + "\"" + Schema + "\"." + Table + ".type_id = 1";
+                }
+                cmd.CommandType = CommandType.Text;
+                try
+                {
+                    cmd.ExecuteNonQuery();
+                    progressBar1.Value++;
+                    Application.DoEvents();
+
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Attenzione Update GEO_ARES<-->IMPORT_ZONE non riuscita", "Update not Complited", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    cmd.Dispose();
+                    conn.Close();
+                    return false;
+                }
+
+                cmd.Dispose();
+                conn.Close();
+
+
+                return true;
+            }
+
+        }
+        private Boolean DropTableSave(String extention)
+        {
+            using (var conn = new NpgsqlConnection(connString))
+
+            {
+                conn.Open();
+                NpgsqlCommand cmd = new NpgsqlCommand();
+                cmd.Connection = conn;
+                txtLog.Text += "7. Drop Tabella di appoggio " + Table + "_import_" +  extention + ";" + Environment.NewLine;
+                progressBar1.Minimum = 0;
+                progressBar1.Maximum = 1;
+                progressBar1.Value = 0;
+                Application.DoEvents();
+
+                if (Schema == "")
+                {
+                    cmd.CommandText = "DROP Table " + Table + "_import_" + extention ;
+                 }
+                else
+                {
+                    cmd.CommandText = "DROP Table " + "\"" + Schema + "\"." + Table + "_import_" + extention;
+                }
+                cmd.CommandType = CommandType.Text;
+                try
+                {
+                    cmd.ExecuteNonQuery();
+                    progressBar1.Value++;
+                    Application.DoEvents();
+
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show("Attenzione Drop tabella di appoggio " + Table + "_import_" + extention + "  non riuscita", "Drop not Complited", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+
+                cmd.Dispose();
+                conn.Close();
+                return true;
+            }
+        }
+
+        string toClean(string pTesto)
+        {
+            pTesto = Regex.Replace(pTesto, "[']", "''");
+            pTesto = Regex.Replace(pTesto, "[åàáâãäæ]", "a");
+            pTesto = Regex.Replace(pTesto, "[ÁÀÄÃÅÂ]", "A");
+            pTesto = Regex.Replace(pTesto, "[èéêë]", "e");
+            pTesto = Regex.Replace(pTesto, "[ÈÉËÊ]", "E");
+            pTesto = Regex.Replace(pTesto, "[ìíîï]", "i");
+            pTesto = Regex.Replace(pTesto, "[ÍÌÏÎ]", "I");
+            pTesto = Regex.Replace(pTesto, "[òóôõö]", "o");
+            pTesto = Regex.Replace(pTesto, "[ÓÒÖÔÕ]", "O");
+            pTesto = Regex.Replace(pTesto, "[ùúûü]", "u");
+            pTesto = Regex.Replace(pTesto, "[ÚÙÛÜ]", "U");
+            pTesto = Regex.Replace(pTesto, "[¥]", "N");
+            pTesto = Regex.Replace(pTesto, "[ý]", "y");
+            pTesto = Regex.Replace(pTesto, "[Š]", "S");
+            pTesto = Regex.Replace(pTesto, "[š]", "s");
+            pTesto = Regex.Replace(pTesto, "[ç]", "c");
+            pTesto = Regex.Replace(pTesto, "[ñ]", "n");
+            pTesto = Regex.Replace(pTesto, "[Ñ]", "N");
+            pTesto = Regex.Replace(pTesto, "[ž]", "z");
+            pTesto = Regex.Replace(pTesto, "[[]", "(");
+            pTesto = Regex.Replace(pTesto, "[]]", ")");
+            pTesto = Regex.Replace(pTesto, "[@]", " ");
+            pTesto = Regex.Replace(pTesto, "[#]", " ");
+            pTesto = Regex.Replace(pTesto, "[ø]", " ");
+            pTesto = Regex.Replace(pTesto, @"[^\u0000-\u007F]", " ");
+            return pTesto;
+        }
+
+        private void timer1_Tick(object sender, EventArgs e)
+        {
+            time = DateTime.Now - start;
+            lblTime.Text = time.ToString(@"hh\:mm\:ss");
+            Application.DoEvents();
+
         }
     }
 }
